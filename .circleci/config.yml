@@ -1,0 +1,147 @@
+version: 2.1
+
+orbs:
+  cloudsmith: cloudsmith/cloudsmith@1.0.1
+
+executors:
+  cloudsmith:
+    docker:
+      - image: cimg/python:3.7
+  terraform:
+    docker:
+      - image: hashicorp/terraform:light
+
+jobs:
+  init:
+    executor: terraform
+    steps:
+      - checkout
+      - run:
+          name: Write Terraform Credentials
+          command: |
+            mkdir ~/.terraform.d
+            echo "credentials {\"app.terraform.io\" {token = \"$TERRAFORM_API_KEY\"}}" > ~/.terraform.d/credentials.tfrc.json 
+      - run:
+          name: Terraform Init
+          command: terraform init
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - .terraform.d
+            - project/.terraform
+  plan:
+    executor: terraform
+    steps:
+      - checkout
+      - attach_workspace:
+            at: ~/
+      - run:
+          name: Terraform Plan
+          command: terraform plan
+  apply:
+    executor: terraform
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Terraform Apply 
+          command: terraform apply
+  check-for-updated-tag:
+    executor: cloudsmith
+    steps:
+      - checkout
+      - cloudsmith/install-cli
+      - run:
+          name: Compare Image Versions 
+          command: |
+            export CURRENT=$(awk -F "= " '/tag/ {print $2}' env.auto.tfvars | sed 's/"//g')
+            export UPDATED=`cloudsmith ls pkgs sturdy-waffle/releases -q "version:latest" -F json | jq -r '.data[0].tags.version[0]'`
+            echo Current: $CURRENT Latest: $UPDATED
+
+            if [ $UPDATED == $CURRENT ]; then
+              echo No change detected - stopping workflow
+              circleci-agent step halt
+            fi
+            echo $CURRENT > ./current_tag
+            echo $UPDATED > ./updated_tag 
+      - persist_to_workspace:
+          root: .
+          paths:
+            - current_tag
+            - updated_tag
+  write-updated-tag:
+    docker:
+      - image: cimg/base:2020.01
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Prepare environment variables
+          command: |
+            echo "export CURRENT=`cat /tmp/workspace/current_tag`" >> $BASH_ENV
+            echo "export UPDATED=`cat /tmp/workspace/updated_tag`" >> $BASH_ENV
+      - run:
+          name: Cleanup ssh keys
+          command: ssh-add -D
+      - add_ssh_keys
+      - run:
+          name: Configure ssh for github 
+          command: |
+            ssh-add ~/.ssh/id_rsa*
+            ssh-keyscan -t rsa github.com > ~/.ssh/known_hosts
+      - run:
+          name: Checkout
+          command: git clone $CIRCLE_REPOSITORY_URL infra
+      - run:
+          name: Update version in environment
+          command: |
+            echo Current: $CURRENT Updated: $UPDATED
+            sed -i "s/$CURRENT/$UPDATED/" env.auto.tfvars
+          working_directory: infra
+      - run:
+          name: Commit updated environment file
+          command: |
+            git config user.name "Acme Bot"
+            git config user.email "bot@superacmecorp.com"
+            git commit -am "Update app dependency: $CURRENT -> $UPDATED"
+            git push
+          working_directory: infra
+      
+
+workflows:
+  deploy-infrastructure:
+    jobs:
+      - init:
+          context: terraform
+      - plan:
+          requires:
+            - init 
+      - approve-apply:
+          type: approval 
+          requires:
+            - init
+            - plan 
+      - apply:
+          requires:
+            - init
+            - plan 
+            - approve-apply
+  update-check:
+    triggers:
+      - schedule:
+          cron: "0 0 * * *"
+          filters:
+            branches:
+              only:
+                  - main
+    jobs:
+      - check-for-updated-tag:
+          context: cloudsmith
+      - approve-version-bump:
+          type: approval
+          requires:
+            - check-for-updated-tag
+      - write-updated-tag:
+          requires:
+            - approve-version-bump
