@@ -1,25 +1,14 @@
-terraform {
-  backend "remote" {
-    organization = "YOUR-ORGANIZATION"
-
-    workspaces {
-      name = "YOUR-WORKSPACE"
-    }
-  }
-}
-
 module "network" {
-   source  = "app.terraform.io/super-acme-corp/network/aws"
-  version = "1.0.0" 
+  source  = "terraform.cloudsmith.io/infrastructure/network/aws"
+  version = "1.0.5" 
 
-  aws_region   = var.aws_region
-  dns_zone_name = var.domain
-  network_name = var.app_name
+  aws_region    = var.aws_region
+  network_name  = var.app_name
 }
 
 module "app" {
-  source  = "app.terraform.io/super-acme-corp/app/aws"
-  version = "1.0.0"
+  source  = "terraform.cloudsmith.io/infrastructure/app/aws"
+  version = "1.0.4"
 
   app_name   = var.app_name
   app_port   = var.app_port
@@ -31,9 +20,7 @@ module "app" {
   container_image             = var.image
   container_tag               = var.tag
 
-  app_subnets = module.network.vpc_private_subnets
-  lb_subdomain = var.subdomain
-  lb_subnets  = module.network.vpc_public_subnets
-  dns_zone_id = module.network.dns_zone_id
-  vpc_id      = module.network.vpc_id
+  lb_arn       = module.network.lb_target_group_arn
+  lb_subnets   = module.network.vpc_public_subnets
+  vpc_id       = module.network.vpc_id
 }
